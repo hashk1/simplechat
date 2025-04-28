@@ -4,6 +4,7 @@ import os
 import boto3
 import re  # 正規表現モジュールをインポート
 from botocore.exceptions import ClientError
+from urllib.request import urlopen, Request
 
 
 # Lambda コンテキストからリージョンを抽出する関数
@@ -14,11 +15,27 @@ def extract_region_from_arn(arn):
         return match.group(1)
     return "us-east-1"  # デフォルト値
 
+
+# .envを読み込む関数（python-dotenvが使えないので作成）
+def load_env_file(filepath=".env"):
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            os.environ[key.strip()] = value.strip()
+# .envの読み込み実行
+load_env_file()
+
+
 # グローバル変数としてクライアントを初期化（初期値）
 bedrock_client = None
 
 # モデルID
-MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
+#MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
 
 def lambda_handler(event, context):
     try:
@@ -43,7 +60,7 @@ def lambda_handler(event, context):
         conversation_history = body.get('conversationHistory', [])
         
         print("Processing message:", message)
-        print("Using model:", MODEL_ID)
+        #print("Using model:", MODEL_ID)
         
         # 会話履歴を使用
         messages = conversation_history.copy()
@@ -54,51 +71,53 @@ def lambda_handler(event, context):
             "content": message
         })
         
-        # Nova Liteモデル用のリクエストペイロードを構築
+
+        # gemma用のリクエストペイロードを構築
         # 会話履歴を含める
-        bedrock_messages = []
+        gemma_messages = ""
         for msg in messages:
             if msg["role"] == "user":
-                bedrock_messages.append({
-                    "role": "user",
-                    "content": [{"text": msg["content"]}]
-                })
+                gemma_messages += "<start_of_turn>user\n" + msg["content"] + "<end_of_turn>\n"
             elif msg["role"] == "assistant":
-                bedrock_messages.append({
-                    "role": "assistant", 
-                    "content": [{"text": msg["content"]}]
-                })
+                gemma_messages += "<start_of_turn>model\n" + msg["content"] + "<end_of_turn>\n"
+        gemma_messages += "<start_of_turn>model\n"
         
-        # invoke_model用のリクエストペイロード
-        request_payload = {
-            "messages": bedrock_messages,
-            "inferenceConfig": {
-                "maxTokens": 512,
-                "stopSequences": [],
-                "temperature": 0.7,
-                "topP": 0.9
-            }
+        
+        # gemma用のリクエストペイロード
+        url = os.environ.get("ENDPOINT_URL") + "/generate"
+        
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
         }
         
-        print("Calling Bedrock invoke_model API with payload:", json.dumps(request_payload))
+        data = {
+            "prompt": gemma_messages,
+            "max_new_tokens": 512,
+            "do_sample": True,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+
+        # JSONエンコードしてbytesに変換
+        json_data = json.dumps(data).encode('utf-8')
         
-        # invoke_model APIを呼び出し
-        response = bedrock_client.invoke_model(
-            modelId=MODEL_ID,
-            body=json.dumps(request_payload),
-            contentType="application/json"
-        )
-        
-        # レスポンスを解析
-        response_body = json.loads(response['body'].read())
-        print("Bedrock response:", json.dumps(response_body, default=str))
-        
-        # 応答の検証
-        if not response_body.get('output') or not response_body['output'].get('message') or not response_body['output']['message'].get('content'):
-            raise Exception("No response content from the model")
-        
+        # RequestにPOSTメソッドを明示的に指定
+        req = Request(url, data=json_data, headers=headers, method="POST")
+
+        try:
+            with urlopen(req) as response:
+                res = response.read().decode('utf-8')
+                print(res)
+        except urllib.error.HTTPError as e:
+            print(f"HTTP Error {e.code}: {e.reason}")
+            print(e.read().decode("utf-8"))
+        except urllib.error.URLError as e:
+            print(f"URL Error: {e.reason}")
+
+
         # アシスタントの応答を取得
-        assistant_response = response_body['output']['message']['content'][0]['text']
+        assistant_response = json.loads(res)["generated_text"]
         
         # アシスタントの応答を会話履歴に追加
         messages.append({

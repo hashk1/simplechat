@@ -12,6 +12,9 @@ frontend/package-lock.json
 # フロントエンドビルド
 frontend/build/
 
+# エンドポイント設定ファイル
+lambda/.env*
+
 # その他一般的な無視ファイル
 .DS_Store
 *.log
